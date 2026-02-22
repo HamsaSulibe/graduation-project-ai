@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Training artifacts
+models/
+outputs/
+data/processed/
+
+# OS
+Thumbs.db
+.DS_Store
