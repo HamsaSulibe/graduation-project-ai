@@ -21,7 +21,6 @@ from src.config.settings import (
     CONFIDENCE_THRESHOLD as SETTINGS_CONFIDENCE_THRESHOLD,
     EMBEDDING_MODEL_DIR,
     GENERATION_FALLBACK_PREFIX,
-    GENERATION_MODEL_NAME,
     INDEX_PATH as SETTINGS_INDEX_PATH,
     LEAKED_INTERNAL_PATTERNS,
     MAX_NEW_TOKENS,
@@ -162,7 +161,7 @@ def load_assets():
     # ── Load generation model (RAG layer) ────────────────────────
     try:
         load_generation_model()
-        print(f"✅ Generation model loaded: {GENERATION_MODEL_NAME}")
+        print("✅ Generation model loaded: Gemini API")
     except Exception as exc:
         # Non‑fatal: the /assistant endpoint will use fallback mode
         print(f"⚠️  Generation model could not be loaded: {exc}")
