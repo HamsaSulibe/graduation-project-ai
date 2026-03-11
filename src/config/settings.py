@@ -8,6 +8,9 @@ single GPU (or CPU‑only with slower inference).
 
 import os
 
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file before any os.getenv() calls
+
 # ──────────────────────────────────────────────
 # 1. Retrieval (embedding model + FAISS index)
 # ──────────────────────────────────────────────
@@ -38,8 +41,7 @@ CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.25"))
 #   $env:GENERATION_MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 #   $env:GENERATION_MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 GENERATION_MODEL_NAME = os.getenv(
-    "GENERATION_MODEL_NAME",
-   "Qwen/Qwen2.5-1.5B-Instruct" ,
+    "GENERATION_MODEL_NAME"
 )
 
 # 128 tokens is enough for short, focused Arabic plant-care answers.
