@@ -1,13 +1,35 @@
-# Python
+# Python virtual environments
 .venv/
+venv/
+env/
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# Training artifacts
+# Jupyter
+.ipynb_checkpoints/
+
+# Training artifacts / ML outputs
 models/
 outputs/
+checkpoints/
+
+# Data (raw & processed)
+data/
+data/raw/
 data/processed/
 
-# OS
+# Build / distribution
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+
+# OS files
 Thumbs.db
 .DS_Store
