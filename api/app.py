@@ -57,6 +57,10 @@ from src.inference.intent_fields import (
     is_direct_intent,
     is_multi_field_intent,
 )
+from src.inference.query_router import (
+    build_general_chat_prompt,
+    classify_route,
+)
 from src.inference.plant_data_store import (
     get_all_plant_names,
     get_plant_data,
@@ -105,6 +109,12 @@ class ChatRequest(BaseModel):
     top_k: int = 1
 
 
+class HistoryMessage(BaseModel):
+    """Single conversation turn used by /assistant for context."""
+    role: str
+    content: str
+
+
 # ── Smart Assistant (RAG) request model ──────────────────────────
 class AssistantRequest(BaseModel):
     """Request body for the /assistant endpoint."""
@@ -112,6 +122,7 @@ class AssistantRequest(BaseModel):
     top_k: int = TOP_K_RETRIEVAL               # عدد النتائج المسترجعة
     climate_data: Optional[dict] = None        # بيانات مناخ اختيارية
     user_conditions: Optional[dict] = None     # ظروف المستخدم اختيارية
+    history: Optional[list[HistoryMessage]] = None  # سجل المحادثة (اختياري)
 
 
 # ---------- Startup ----------
@@ -207,6 +218,188 @@ def clean_arabic_answer(text: str) -> str:
     # Strip surrounding quote characters
     text = text.strip('"\'“”‘’`')
     return text.strip()
+
+
+# ---------- Conversation context helpers ----------
+_HISTORY_ROLE_MAP = {
+    "user": "user",
+    "human": "user",
+    "assistant": "assistant",
+    "bot": "assistant",
+    "system": "system",
+}
+
+_FOLLOWUP_PATTERNS = {
+    "كمل",
+    "كمّل",
+    "اشرح اكثر",
+    "اشرح أكثر",
+    "ماذا تقصد",
+    "ماذا عنه",
+    "ماذا عنها",
+    "وهل نفس الشي ينطبق هنا",
+    "وهل نفس الشي ينطبق",
+    "وهل نفس الشي",
+    "ماذا عن",
+    "هل يناسبها",
+    "هل يناسبه",
+    "ما نوع التربة له",
+    "ما نوع التربة لها",
+}
+
+_WEAK_HISTORY_INTENTS = {
+    "general_summary",
+    "care_summary",
+    "plant_overview",
+    "growing_guide",
+    "beginner_overview",
+}
+
+MAX_HISTORY_MESSAGES = 8
+
+
+def normalize_history_messages(
+    history: Optional[list[HistoryMessage]],
+    max_messages: int = MAX_HISTORY_MESSAGES,
+) -> list[dict[str, str]]:
+    """
+    Normalize incoming history:
+    - accepts mixed role casing (USER/user/Assistant/...)
+    - drops empty/invalid turns
+    - keeps only the latest *max_messages* turns
+    """
+    if not history:
+        return []
+
+    normalized: list[dict[str, str]] = []
+    for msg in history:
+        role_raw = (getattr(msg, "role", "") or "").strip().lower()
+        content = (getattr(msg, "content", "") or "").strip()
+        if not content:
+            continue
+
+        role = _HISTORY_ROLE_MAP.get(role_raw)
+        if role is None:
+            if role_raw in {"user", "assistant", "system"}:
+                role = role_raw
+            else:
+                continue
+
+        normalized.append({"role": role, "content": content})
+
+    if max_messages > 0 and len(normalized) > max_messages:
+        return normalized[-max_messages:]
+    return normalized
+
+
+def is_ambiguous_followup_question(question: str) -> bool:
+    """Detect short follow-up queries that depend on previous turns."""
+    q = normalize_ar_text(question)
+    if not q:
+        return False
+
+    compact = re.sub(r"\s+", " ", q).strip().lower()
+    if compact in _FOLLOWUP_PATTERNS:
+        return True
+
+    short_followup_tokens = {
+        "كمل", "كمّل", "وضح", "وضّح", "ليش", "لماذا", "طيب", "طيب؟",
+        "كيف", "وهل", "هل", "عنه", "عنها", "له", "لها", "هنا", "نفس",
+    }
+
+    words = compact.split()
+    if len(words) <= 4 and any(w in short_followup_tokens for w in words):
+        return True
+
+    if len(compact) <= 18:
+        return True
+
+    return False
+
+
+def _has_strong_domain_intent_signal(intents: list[str]) -> bool:
+    if not intents:
+        return False
+    return any(intent not in _WEAK_HISTORY_INTENTS for intent in intents)
+
+
+def infer_intents_from_history(history: list[dict[str, str]]) -> list[str]:
+    """Infer likely domain intents from recent user turns for short follow-ups."""
+    if not history:
+        return []
+
+    for turn in reversed(history[-8:]):
+        if turn.get("role") != "user":
+            continue
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+
+        candidate = classify_intents(content)
+        if _has_strong_domain_intent_signal(candidate):
+            return candidate
+
+    return []
+
+
+def infer_plant_from_history(
+    history: list[dict[str, str]],
+    all_plant_names: list[str],
+) -> Optional[str]:
+    """Resolve pronoun-like follow-ups to the latest known plant in history."""
+    if not history or not all_plant_names:
+        return None
+
+    for turn in reversed(history[-10:]):
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+        matched = extract_target_plant(content, all_plant_names)
+        if matched:
+            return matched
+
+    return None
+
+
+def build_safe_domain_fallback(suggested_name: Optional[str] = None) -> str:
+    """Clear, polite no-hallucination fallback for domain questions."""
+    msg = (
+        "عذرًا، المعلومات المتاحة في قاعدة البيانات الحالية غير كافية للإجابة بدقة على هذا السؤال. "
+        "إذا أحببت، يمكنني مساعدتك بسؤال نباتي آخر مدعوم بشكل أوضح."
+    )
+    if suggested_name:
+        msg += f"\n\nهل تقصد: {suggested_name}؟"
+    return msg
+
+
+def build_effective_question(question: str, history: list[dict[str, str]]) -> str:
+    """
+    Build a context-aware question for retrieval/intent parsing.
+
+    For ambiguous follow-ups, prepend recent conversation context so
+    extraction/retrieval can resolve pronouns and references.
+    """
+    q = (question or "").strip()
+    if not q or not history:
+        return q
+
+    if not is_ambiguous_followup_question(q):
+        return q
+
+    recent_turns = history[-4:]
+    context_lines: list[str] = []
+    for turn in recent_turns:
+        role = turn["role"]
+        label = "المستخدم" if role == "user" else "المساعد" if role == "assistant" else "النظام"
+        text = turn["content"].strip()
+        if text:
+            context_lines.append(f"{label}: {text}")
+
+    if not context_lines:
+        return q
+
+    conversation_context = "\n".join(context_lines)
+    return f"سياق المحادثة:\n{conversation_context}\n\nالسؤال الحالي: {q}"
 
 
 # ---------- Basic ----------
@@ -428,14 +621,16 @@ def assistant(req: AssistantRequest):
     """
     المساعد الذكي للنباتات – Excel-first architecture.
 
-    Three response modes
+     Four response modes
     --------------------
     1. **direct_from_excel** – single-topic question, answer built
        entirely from structured Excel data.  No LLM call.
     2. **rewrite_from_excel** – multi-topic question, a data draft is
        built from Excel and the LLM only *rewrites* it into natural
        Arabic.  The model is NOT a source of information.
-    3. **fallback** – plant not found in Excel or retrieval too weak.
+     3. **general_conversation** – out-of-domain question routed to
+         Gemini as a normal assistant answer (no DB-grounding claims).
+     4. **fallback** – plant-domain question but insufficient evidence.
        Returns a safe no-answer message.
     """
     t0 = time.perf_counter()
@@ -443,15 +638,24 @@ def assistant(req: AssistantRequest):
 
     logger.info(
         "[/assistant] ← entered | question=%r | top_k=%d | "
-        "climate_data=%s | user_conditions=%s",
+        "climate_data=%s | user_conditions=%s | history=%s",
         req.question, req.top_k,
-        bool(req.climate_data), bool(req.user_conditions),
+        bool(req.climate_data), bool(req.user_conditions), bool(req.history),
+    )
+
+    # Normalize optional chat history and build an effective query.
+    history_messages = normalize_history_messages(req.history)
+    effective_question = build_effective_question(req.question, history_messages)
+    logger.info(
+        "[/assistant] context-aware question used=%s | history_turns=%d",
+        effective_question != req.question,
+        len(history_messages),
     )
 
     # ── Step 1: Classify the question into intent(s) ──────────────
     _t = time.perf_counter()
     try:
-        intents = classify_intents(req.question)
+        intents = classify_intents(effective_question)
     except Exception:
         logger.error("[/assistant] intent classification FAILED\n%s", traceback.format_exc())
         intents = []
@@ -460,7 +664,96 @@ def assistant(req: AssistantRequest):
 
     direct = is_direct_intent(intents)
     multi = is_multi_field_intent(intents)
+
+    # Follow-up intent repair: if the current question is short/ambiguous,
+    # borrow stronger domain intents from recent user turns.
+    if is_ambiguous_followup_question(req.question) and not _has_strong_domain_intent_signal(intents):
+        inferred_intents = infer_intents_from_history(history_messages)
+        if inferred_intents:
+            intents = inferred_intents
+            direct = is_direct_intent(intents)
+            multi = is_multi_field_intent(intents)
+            logger.info("[/assistant] intents refined from history: %s", intents)
+
     logger.info("[/assistant] direct=%s  multi=%s", direct, multi)
+
+    # ── Step 1.5: Route question (domain_rag vs general chat) ───
+    _t = time.perf_counter()
+    all_names_for_routing = get_all_plant_names() if is_store_loaded() else []
+    route_decision = classify_route(
+        question=effective_question,
+        intents=intents,
+        all_plant_names=all_names_for_routing,
+        conversation_history=history_messages,
+        is_followup=is_ambiguous_followup_question(req.question),
+    )
+    _timings["routing"] = time.perf_counter() - _t
+    logger.info(
+        "[/assistant] ⏱  Routing: %.3fs  (route=%s, reason=%s)",
+        _timings["routing"],
+        route_decision.route,
+        route_decision.reason,
+    )
+
+    if route_decision.route == "general_conversation":
+        # Out-of-domain question: answer conversationally via Gemini,
+        # without pretending the answer is grounded in plant data.
+        generation_used = False
+        response_mode = "general_conversation"
+        best_score = 0.0
+        retrieved_sources = []
+        alternatives = []
+
+        if is_model_loaded():
+            _t_gen = time.perf_counter()
+            try:
+                general_prompt = build_general_chat_prompt(
+                    user_question=req.question,
+                    conversation_history=history_messages if history_messages else None,
+                )
+                answer = clean_arabic_answer(generate_grounded_answer(general_prompt))
+                generation_used = True
+                _timings["generation"] = time.perf_counter() - _t_gen
+            except Exception:
+                logger.error("[/assistant] general conversation generation FAILED\n%s", traceback.format_exc())
+                answer = (
+                    "تعذر علي توليد رد عام الآن. "
+                    "حاول مرة أخرى بعد قليل."
+                )
+        else:
+            answer = (
+                "وضع المحادثة العامة غير متاح الآن لأن خدمة التوليد غير مهيأة. "
+                "حاول لاحقًا."
+            )
+
+        elapsed = time.perf_counter() - t0
+        _timings["total"] = elapsed
+        logger.info(
+            "[/assistant] ━━━━━━━━━━━━━━ PERFORMANCE SUMMARY ━━━━━━━━━━━━━━\n"
+            "  ⏱  Intent        : %7.3f s\n"
+            "  ⏱  Routing       : %7.3f s\n"
+            "  ⏱  Generation    : %7.3f s\n"
+            "  ⏱  TOTAL         : %7.3f s\n"
+            "  responseMode=%s | generationUsed=%s | route=%s",
+            _timings.get("intent", 0.0),
+            _timings.get("routing", 0.0),
+            _timings.get("generation", 0.0),
+            elapsed,
+            response_mode,
+            generation_used,
+            route_decision.route,
+        )
+
+        return {
+            "question": req.question,
+            "answer": answer,
+            "responseMode": response_mode,
+            "retrievedSources": retrieved_sources,
+            "suggestedAlternatives": alternatives,
+            "detectedIntents": intents,
+            "confidence": best_score,
+            "generationUsed": generation_used,
+        }
 
     # ── Step 2: Try to identify the target plant from the question ─
     _t = time.perf_counter()
@@ -471,7 +764,9 @@ def assistant(req: AssistantRequest):
     if is_store_loaded():
         # Try extract_target_plant first (keyword/fuzzy match in question)
         all_names = get_all_plant_names()
-        plant_name = extract_target_plant(req.question, all_names)
+        plant_name = extract_target_plant(effective_question, all_names)
+        if not plant_name and is_ambiguous_followup_question(req.question):
+            plant_name = infer_plant_from_history(history_messages, all_names)
         if plant_name:
             plant_data = get_plant_data(plant_name)
             # Try to get the canonical display name
@@ -489,7 +784,7 @@ def assistant(req: AssistantRequest):
     _t = time.perf_counter()
     try:
         retrieved = retrieve_relevant_context(
-            query=req.question,
+            query=effective_question,
             model=model,
             index=index,
             cards=cards,
@@ -551,7 +846,7 @@ def assistant(req: AssistantRequest):
         alternatives = []
     _timings["context"] = time.perf_counter() - _t
 
-    suggestion = suggest_plant_name(req.question) if not excel_hit else None
+    suggestion = suggest_plant_name(effective_question) if not excel_hit else None
 
     # ══════════════════════════════════════════════════════════════
     # DECISION: Choose response mode
@@ -571,7 +866,7 @@ def assistant(req: AssistantRequest):
             logger.info("[/assistant] MODE: direct_from_excel")
         else:
             # Data exists but specific fields are empty → fallback
-            answer = SAFE_NO_ANSWER
+            answer = build_safe_domain_fallback()
             response_mode = "fallback"
             logger.info("[/assistant] MODE: fallback (insufficient direct data)")
         _timings["answer_build"] = time.perf_counter() - _t
@@ -594,6 +889,7 @@ def assistant(req: AssistantRequest):
                         answer_draft=draft,
                         climate_context=climate_text,
                         user_context=user_text,
+                        conversation_history=history_messages if history_messages else None,
                     )
                     _timings["prompt"] = time.perf_counter() - _t2
 
@@ -616,11 +912,11 @@ def assistant(req: AssistantRequest):
                 response_mode = "rewrite_from_excel"
                 logger.info("[/assistant] MODE: rewrite_from_excel (raw draft, model not loaded)")
             else:
-                answer = SAFE_NO_ANSWER
+                answer = build_safe_domain_fallback()
                 response_mode = "fallback"
         else:
             _timings["answer_build"] = time.perf_counter() - _t
-            answer = SAFE_NO_ANSWER
+            answer = build_safe_domain_fallback()
             response_mode = "fallback"
             logger.info("[/assistant] MODE: fallback (insufficient multi-field data)")
 
@@ -632,7 +928,7 @@ def assistant(req: AssistantRequest):
         if answer:
             response_mode = "direct_from_excel"
         else:
-            answer = SAFE_NO_ANSWER
+            answer = build_safe_domain_fallback()
             response_mode = "fallback"
 
     else:
@@ -663,6 +959,7 @@ def assistant(req: AssistantRequest):
                         climate_context=climate_text,
                         user_context=user_text,
                         alternative_suggestions=alternatives if alternatives else None,
+                        conversation_history=history_messages if history_messages else None,
                     )
                     _timings["prompt"] = time.perf_counter() - _t
 
@@ -686,10 +983,10 @@ def assistant(req: AssistantRequest):
                 response_mode = "fallback"
             _timings["answer_build"] = time.perf_counter() - _t
         else:
-            answer = SAFE_NO_ANSWER
+            answer = build_safe_domain_fallback(
+                suggested_name=suggestion["suggested"] if suggestion else None,
+            )
             response_mode = "fallback"
-            if suggestion:
-                answer += f"\n\nهل تقصد: {suggestion['suggested']}؟"
 
         logger.info("[/assistant] MODE: %s", response_mode)
 
@@ -701,7 +998,7 @@ def assistant(req: AssistantRequest):
             logger.warning("[/assistant] SAFETY NET: answer too short → fallback")
             answer = clean_arabic_answer(
                 format_fallback_answer(retrieved, GENERATION_FALLBACK_PREFIX)
-            ) if retrieved else SAFE_NO_ANSWER
+            ) if retrieved else build_safe_domain_fallback()
             generation_used = False
             response_mode = "fallback"
         else:
@@ -710,7 +1007,7 @@ def assistant(req: AssistantRequest):
                     logger.warning("[/assistant] SAFETY NET: leaked pattern %r → fallback", pattern)
                     answer = clean_arabic_answer(
                         format_fallback_answer(retrieved, GENERATION_FALLBACK_PREFIX)
-                    ) if retrieved else SAFE_NO_ANSWER
+                    ) if retrieved else build_safe_domain_fallback()
                     generation_used = False
                     response_mode = "fallback"
                     break
