@@ -34,6 +34,7 @@ def build_assistant_prompt(
     climate_context: Optional[str] = None,
     user_context: Optional[str] = None,
     alternative_suggestions: Optional[list[str]] = None,
+    conversation_history: Optional[list[dict[str, str]]] = None,
 ) -> str:
     """
     Assemble the full prompt string that will be passed to the generation model.
@@ -55,6 +56,8 @@ def build_assistant_prompt(
         Known user conditions (e.g. "شرفة مظللة، أصيص 25 سم").
     alternative_suggestions : list[str] | None
         Pre‑computed alternative plant names (may be empty).
+    conversation_history : list[dict[str, str]] | None
+        Optional chat history for conversation continuity.
 
     Returns
     -------
@@ -89,6 +92,20 @@ def build_assistant_prompt(
     if user_context:
         sections.append(f"{_AL['user_context']}\n{user_context}")
 
+    # -- Conversation history (optional) ---------------------------
+    if conversation_history:
+        history_lines: list[str] = []
+        for turn in conversation_history:
+            role = turn.get("role", "")
+            content = (turn.get("content", "") or "").strip()
+            if not content:
+                continue
+            role_label = "المستخدم" if role == "user" else "المساعد" if role == "assistant" else "النظام"
+            history_lines.append(f"{role_label}: {content}")
+        if history_lines:
+            history_label = _AL.get("conversation_history", "سياق المحادثة السابقة:")
+            sections.append(f"{history_label}\n" + "\n".join(history_lines))
+
     # -- Pre‑computed alternative suggestions (optional) -----------
     if alternative_suggestions:
         alts = "، ".join(alternative_suggestions)
@@ -111,6 +128,7 @@ def build_rewrite_prompt(
     answer_draft: str,
     climate_context: Optional[str] = None,
     user_context: Optional[str] = None,
+    conversation_history: Optional[list[dict[str, str]]] = None,
 ) -> str:
     """
     Build a prompt that asks the LLM to REWRITE (not generate)
@@ -127,6 +145,19 @@ def build_rewrite_prompt(
         sections.append(f"{_RL['climate']}\n{climate_context}")
     if user_context:
         sections.append(f"{_RL['user_context']}\n{user_context}")
+
+    if conversation_history:
+        history_lines: list[str] = []
+        for turn in conversation_history:
+            role = turn.get("role", "")
+            content = (turn.get("content", "") or "").strip()
+            if not content:
+                continue
+            role_label = "المستخدم" if role == "user" else "المساعد" if role == "assistant" else "النظام"
+            history_lines.append(f"{role_label}: {content}")
+        if history_lines:
+            history_label = _RL.get("conversation_history", "سياق المحادثة السابقة:")
+            sections.append(f"{history_label}\n" + "\n".join(history_lines))
 
     sections.append(f"{_RL['user_question']}\n{user_question}")
     sections.append(_R["final_instruction"])
