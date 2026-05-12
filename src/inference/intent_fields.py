@@ -32,18 +32,137 @@ _INTENT_INDEX: dict[str, dict] = {i["name"]: i for i in INTENTS}
 # ─────────────────────────────────────────────────────────────────
 # 1.  Intent classification
 # ─────────────────────────────────────────────────────────────────
+# High-confidence task-schedule patterns (used to preempt multi-match priority)
+# These multi-word phrases unambiguously signal a task/schedule question.
+_TASK_PREEMPT_PATTERNS: tuple[str, ...] = (
+    "جدول العناية",
+    "جدول المهام",
+    "جدول رعاية",
+    "مهام العناية",
+    "مهام عناية",      # without ال (e.g. "مهام عناية الريحان")
+    "كل كم يوم",
+    "كم يوم مهمة",
+    "مواعيد العناية",
+    "عندي مهمة",
+    "كل كم",
+    "تذكيرات",
+    # New patterns
+    "روتين المهام",
+    "روتين العناية",
+    "المطلوب أعمل",
+    "شو المطلوب",
+    "ايش المطلوب",
+    "ايش لازم أعمل",
+    "ايش لازم اعمل",
+    "شو لازم أعمل",
+    "شو لازم اعمل",
+    "مهام للنبات",
+    "مهام الرعاية",
+    # Standalone high-signal task words – any question containing "مهام" or
+    # "مهمة" is a task/schedule question regardless of other context words.
+    # This prevents "مهام" + "عناية" from mixing tasks+care_summary (multi-field).
+    "مهام",
+    "مهمة",
+    "care schedule",
+    "task schedule",
+    "care routine",
+    "tasks",
+    "task",
+    "schedule",
+    "routine",
+)
+
+# High-confidence comparison patterns that unambiguously signal a comparison
+# between two plants.  Must be checked BEFORE task preemption.
+_COMPARISON_PREEMPT_PATTERNS: tuple[str, ...] = (
+    "مين أسهل",
+    "أيهما أسهل",
+    "مين أفضل",
+    "أيهما أفضل",
+    "مين يحتاج ري",
+    "مين يتحمل",
+    "مين أسرع",
+    "مين مناسب أكثر",
+    "قارن بين",
+    "الفرق بين",
+    "أي نبات أسهل",
+    "أي نبات أسرع",
+    "أي نبات أفضل",
+    "أي نبات يحتاج",
+    "compare",
+    "compare between",
+    "difference between",
+    "which is easier",
+    "which is better",
+    "which is faster",
+    "which plant is easier",
+    "which plant is better",
+    "needs more water",
+    "tolerates heat",
+    "tolerates cold",
+)
+
+
 def classify_intents(question: str) -> list[str]:
     """
     Analyse *question* and return matching intent names.
 
     Multi-field intents are checked FIRST so that broad questions
-    like "كيف أعتني بالنعناع" land on care_summary rather than
+    like "كيف أعتني بالنبات المطابق" land on care_summary rather than
     a dozen individual intents.
 
     Falls back to ``["general_summary"]`` if nothing matches.
     """
     q_norm = normalize(question).lower()
     q_words = set(q_norm.split())
+
+    # ── Comparison preemption ─────────────────────────────────────────────────
+    # Multi-word patterns that unambiguously mean "compare two plants".
+    # Must be checked BEFORE task preemption to avoid mis-routing
+    # e.g. "مين أسهل النبات A ولا النبات B؟" → comparison (not care_summary).
+    for _pat in _COMPARISON_PREEMPT_PATTERNS:
+        if normalize(_pat).lower() in q_norm:
+            return ["comparison"]
+
+    # ── Task-schedule preemption ──────────────────────────────────────────
+    # Specific multi-word task patterns override the normal multi_match priority
+    # so that "جدول العناية" maps to tasks rather than care_summary.
+    for _pat in _TASK_PREEMPT_PATTERNS:
+        if normalize(_pat).lower() in q_norm:
+            return ["tasks"]
+
+    # ── Germination preemption ────────────────────────────────────────────
+    # Questions that specifically ask about germination days → germination intent only.
+    _GERMINATION_PREEMPT: tuple[str, ...] = (
+        "ينبت", "الانبات", "الإنبات", "أيام الإنبات", "مدة الإنبات", "يطلع البذر",
+    )
+    for _pat in _GERMINATION_PREEMPT:
+        if normalize(_pat).lower() in q_norm:
+            return ["germination"]
+
+    # ── Spacing preemption ────────────────────────────────────────────────
+    # Questions about spacing distance → spacing intent only.
+    # Triggered by "تباعد" alone, or "مسافة" combined with "بين"/"نباتات".
+    _q_has_msafa = normalize("مسافة") in q_norm
+    _q_has_tabaud = normalize("تباعد") in q_norm
+    _q_has_bein = normalize("بين") in q_norm
+    _q_has_nabataat = normalize("نباتات") in q_norm
+    if _q_has_tabaud or (_q_has_msafa and (_q_has_bein or _q_has_nabataat)):
+        return ["spacing"]
+
+    # ── Planting-note preemption ──────────────────────────────────────────
+    # "ملاحظة الزراعة" / "ملاحظات الزراعة" → season intent (Month_Plants notes).
+    _PLANTING_NOTE_PREEMPT: tuple[str, ...] = (
+        "ملاحظة الزراعة", "ملاحظات الزراعة", "ملاحظات زراعة",
+    )
+    for _pat in _PLANTING_NOTE_PREEMPT:
+        if normalize(_pat).lower() in q_norm:
+            return ["season"]
+    # "متى أزرع" / "متى ازرع" / "أيمتى ازرع" → season (when to plant = Month_Plants)
+    _q_has_mata = normalize("متى") in q_norm or normalize("أيمتى") in q_norm
+    _q_has_azra = any(p in q_norm for p in (normalize("ازرع"), normalize("أزرع"), normalize("تزرع"), normalize("يزرع"), normalize("أزرع"), normalize("زراعة")))
+    if _q_has_mata and _q_has_azra:
+        return ["season"]
 
     multi_match: list[str] = []
     direct_match: list[str] = []
