@@ -23,7 +23,23 @@ import re
 # ─────────────────────────────────────────────────────────────────
 DIACRITICS_RE = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
 _TATWEEL = "\u0640"
-_PREFIX_RE = re.compile(r"^(?:ال|لل|ل)\s*", re.UNICODE)
+
+# Prefix patterns for normalize_name  (longest first)
+_PREFIX_RE = re.compile(
+    r"^(?:بال|وال|فال|كال|لل|ال|ب|ل|ك|و|ف)\s*",
+    re.UNICODE,
+)
+
+# ─────────────────────────────────────────────────────────────────
+# Arabic word-prefix constants (for query-token normalisation)
+# ─────────────────────────────────────────────────────────────────
+# Ordered longest-first so that "بال" is stripped before bare "ب"
+_AR_WORD_PREFIXES: tuple[str, ...] = (
+    "بال", "وال", "فال", "كال",   # preposition + definite article
+    "لل",                          # lam + lam  (للنعنع)
+    "ال",                          # definite article
+    "ب", "ل", "ك", "و", "ف",      # single prepositions
+)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -71,12 +87,39 @@ def normalize_name(name: str) -> str:
     """
     Normalise a plant name for fuzzy matching:
       - ``normalize_query()``
-      - Strip leading ال / لل / ل prefixes
+      - Strip leading ال / لل / بال / ل / ب … prefixes
     """
     s = normalize_query(name)
-    for _ in range(2):
+    for _ in range(3):
+        prev = s
         s = _PREFIX_RE.sub("", s).strip()
-    for _ in range(2):
-        if s.startswith("ال") and len(s) > 2:
-            s = s[2:].strip()
+        if s == prev:
+            break
     return s
+
+
+# ─────────────────────────────────────────────────────────────────
+# Token-level prefix stripping  (for extract_target_plant)
+# ─────────────────────────────────────────────────────────────────
+
+def strip_ar_word_prefix(word: str) -> list[str]:
+    """
+    Return all prefix-stripped variants of a single (normalised)
+    Arabic word token.
+
+    Example
+    -------
+    >>> strip_ar_word_prefix("للنبات")
+    ["للنبات", "نبات"]
+    >>> strip_ar_word_prefix("بالنبات")
+    ["بالنبات", "نبات"]
+    >>> strip_ar_word_prefix("النبات")
+    ["النبات", "نبات"]
+    """
+    variants: set[str] = {word}
+    for pfx in _AR_WORD_PREFIXES:
+        if word.startswith(pfx) and len(word) > len(pfx) + 1:
+            stripped = word[len(pfx):]
+            if len(stripped) >= 2:
+                variants.add(stripped)
+    return list(variants)
