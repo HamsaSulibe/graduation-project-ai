@@ -58,26 +58,31 @@ _QUESTION_OPENERS: list[str] = [
 _DOMAIN_SKIP_TOKENS: frozenset[str] = frozenset({
     # Generic plant-domain nouns (never a specific plant name)
     "نبات", "نبتة", "نباتات", "عشبة", "اعشاب", "أعشاب",
-    "زراعة", "ري", "تربة", "سماد", "حصاد", "ضوء", "شمس",
+    "زراعة", "ازرع", "أزرع", "يزرع", "تزرع", "زرع",
+    "ري", "تربة", "سماد", "حصاد", "ضوء", "شمس",
     "اصيص", "موسم", "فلسطين",
+    "مباشر", "مباشرة", "مباشره", "غير", "تحب", "يحب",
+    "يحتاج", "تحتاج", "بحب", "بتحب", "بدها", "بده",
     # Care/task schedule words
     "مهام", "مهمة", "مهمه",
     "جدول",
-    "عناية", "عنايه",
+    "عناية", "عنايه", "اعتني", "أعتني",
     "تذكير", "تذكيرات",
     "روتين",
     # Watering/fertilizing actions
-    "سقي", "اسقي", "أسقي",
+    "سقي", "اسقي", "أسقي", "اسقيه", "اسقيها", "أسقيه", "أسقيها",
+    "احصده", "احصدها", "أحصده", "أحصدها",
     "تسميد",
     # Generic question / info words
     "معلومات", "معلومه", "معلومة",
-    "سؤال", "اسئلة", "أسئلة",
+    "سؤال", "اسئلة", "أسئلة", "كيف",
     # Time / frequency words
-    "يوم", "أيام", "ايام", "أسبوع", "اسبوع", "شهر",
+    "متى", "متي", "أيمتى", "ايمتى", "يوم", "أيام", "ايام", "أسبوع", "اسبوع", "شهر",
     "مرة", "مره", "كم",
     # Benefit / use / info intent words (never plant names)
     "فوائد", "فوايد", "فائدة", "فايدة",
-    "استخدامات", "استخدام",
+    "استخدامات", "استخدام", "استخداماته", "استخداماتها", "استخدامها",
+    "تربته", "تربتها",
     "ملاحظة", "ملاحظات",
     "نصائح", "نصايح", "نصيحة",
     "وصف", "تعريف",
@@ -97,6 +102,7 @@ _DOMAIN_SKIP_TOKENS: frozenset[str] = frozenset({
     "نوع", "أنواع", "انواع",
     # Possessive / colloquial verbs
     "عندك", "عندي", "عنده", "عندها", "عندنا",
+    "فيه", "فيها", "اله", "إله", "له", "لها",
     "خمنلي",
     # English plant-domain and question words
     "plant", "plants", "herb", "herbs", "care", "watering", "water",
@@ -160,14 +166,14 @@ def _detect_unlisted_plant_mention(
     if not candidate:
         return None
 
-    # If the candidate closely matches a known plant (score >= 60) it should have
+    # If the candidate closely matches a known plant (score >= 85) it should have
     # been caught by extract_target_plant already → not a true plant_not_found.
     try:
         from rapidfuzz import process as _rfp, fuzz as _rff
         name_norms = [normalize(n).lower() for n in known_plant_names if n]
         if name_norms:
             best = _rfp.extractOne(candidate, name_norms, scorer=_rff.WRatio)
-            if best and best[1] >= 60:
+            if best and best[1] >= 85:
                 return None
     except ImportError:
         pass
