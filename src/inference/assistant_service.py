@@ -22,15 +22,19 @@ from src.config.settings import (
     GENERATION_FALLBACK_PREFIX,
     LEAKED_INTERNAL_PATTERNS,
 )
-from src.utils.arabic import normalize
+from src.config.assistant_messages import ASSISTANT_MESSAGES
+from src.config.assistant_patterns import (
+    EXPLICIT_COMPARISON_PATTERNS,
+    HISTORY_FOLLOWUP_PATTERNS,
+    HISTORY_PRONOUN_PATTERN,
+)
+from src.utils.arabic import normalize, normalize_query
 from src.inference.rag_generator import generate_grounded_answer, is_model_loaded
 from src.inference.prompt_builder import build_rewrite_prompt
 from src.inference.context_utils import (
     build_answer_draft,
     build_direct_answer,
     collect_user_and_climate_context,
-    detect_comparison_criterion,
-    extract_plant_name,
     extract_target_plant,
     format_fallback_answer,
     get_best_retrieval_score,
@@ -72,7 +76,6 @@ from src.inference.answer_cleaning import (
 )
 from src.inference.conversation_context import (
     normalize_history_messages,
-    is_ambiguous_followup_question,
     infer_intents_from_history,
     infer_plant_from_history,
     build_effective_question,
@@ -95,6 +98,25 @@ CONFIDENCE_THRESHOLD = SETTINGS_CONFIDENCE_THRESHOLD
 
 _ARABIC_CHAR_RE = re.compile(r"[\u0600-\u06FF]")
 _LATIN_CHAR_RE = re.compile(r"[A-Za-z]")
+
+_HISTORY_PRONOUN_RE = re.compile(HISTORY_PRONOUN_PATTERN)
+
+
+def _has_explicit_comparison_signal(question: str) -> bool:
+    q_norm = normalize_query(question).lower()
+    return any(normalize_query(p).lower() in q_norm for p in EXPLICIT_COMPARISON_PATTERNS)
+
+
+def _should_use_history_context(question: str, plant_from_question: Optional[str]) -> bool:
+    """Only allow history for pronoun-like or explicitly referential follow-ups."""
+    if plant_from_question:
+        return False
+    compact = normalize_query(question).lower()
+    if not compact:
+        return False
+    if any(normalize_query(p).lower() in compact for p in HISTORY_FOLLOWUP_PATTERNS):
+        return True
+    return bool(_HISTORY_PRONOUN_RE.search(compact))
 
 
 def _detect_answer_language(req: AssistantRequest) -> str:
@@ -121,42 +143,8 @@ def _is_en(language: str) -> bool:
 
 
 def _msg(language: str, key: str) -> str:
-    messages = {
-        "missing_data": {
-            "ar": "هذه المعلومة غير متوفرة في بيانات التطبيق.",
-            "en": "This information is not available in the app data.",
-        },
-        "plant_not_found": {
-            "ar": "هذا النبات غير متوفر حاليًا في غرسة.",
-            "en": "This plant is not currently available in Gharsa.",
-        },
-        "out_of_scope": {
-            "ar": "أنا مساعد غرسة، بقدر أساعدك فقط في العناية بالنباتات الموجودة داخل التطبيق.",
-            "en": "I’m Gharsa’s assistant. I can only help with plant-care questions for plants available in the app.",
-        },
-        "ask_for_plant": {
-            "ar": "من فضلك اذكر اسم النبتة التي تريد معلومات عنها.",
-            "en": "Please mention the plant you want information about.",
-        },
-        "greeting": {
-            "ar": "أهلاً وسهلاً! أنا مساعد غرسة الذكي. كيف أقدر أساعدك بالعناية بنباتاتك؟",
-            "en": "Hello! I’m Gharsa’s smart assistant. How can I help with your plant care today?",
-        },
-        "unsafe": {
-            "ar": "لا أستطيع إضافة معلومات من خارج بيانات غرسة. اسألني عن معلومة موجودة في بيانات التطبيق فقط.",
-            "en": "I can’t add information from outside Gharsa’s data. Please ask about information available in the app data only.",
-        },
-        "unclear_plant": {
-            "ar": "مش قادر أحدد النبتة المقصودة من سؤالك. اكتب اسم النبتة الموجودة في تطبيق غرسة بشكل أوضح.",
-            "en": "I can’t identify the plant from your question. Please write the name of a plant available in Gharsa more clearly.",
-        },
-        "insufficient_context": {
-            "ar": "هذه المعلومة غير متوفرة في بيانات التطبيق.",
-            "en": "This information is not available in the app data.",
-        },
-    }
     lang_key = "en" if _is_en(language) else "ar"
-    return messages[key][lang_key]
+    return ASSISTANT_MESSAGES[key][lang_key]
 
 # ── Shared runtime state injected by app.py startup ──────────────────────────
 _model = None
@@ -293,72 +281,101 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
         bool(req.climate_data), bool(req.user_conditions), bool(req.history),
     )
 
-    # Normalize optional chat history and build a context-aware query.
+    # Normalize optional chat history, but do not let it override explicit
+    # plant/intent signals from the current question.
     history_messages = normalize_history_messages(req.history)
-    effective_question = build_effective_question(req.question, history_messages)
+    all_names_for_context = get_all_plant_lookup_names() if is_store_loaded() else []
+    detected_plant_from_question = (
+        extract_target_plant(req.question, all_names_for_context)
+        if all_names_for_context
+        else None
+    )
+    detected_unlisted_from_question = (
+        _detect_unlisted_plant_mention(req.question, all_names_for_context)
+        if all_names_for_context and not detected_plant_from_question
+        else None
+    )
+    is_followup = (
+        not detected_unlisted_from_question
+        and _should_use_history_context(req.question, detected_plant_from_question)
+    )
+    effective_question = (
+        build_effective_question(req.question, history_messages)
+        if is_followup
+        else req.question
+    )
     logger.info(
-        "[/assistant] context-aware question used=%s | history_turns=%d",
+        "[/assistant] context-aware question used=%s | history_turns=%d | "
+        "isFollowup=%s | plantFromQuestion=%r | unlistedFromQuestion=%r",
         effective_question != req.question,
         len(history_messages),
+        is_followup,
+        detected_plant_from_question,
+        detected_unlisted_from_question,
     )
 
     # ── Step 1: Classify intent(s) ───────────────────────────────────────────
     _t = time.perf_counter()
+    detected_intents_from_history: list[str] = []
+    used_history_intent = False
+    used_comparison_context = False
     try:
-        intents = classify_intents(effective_question)
+        detected_intents_from_question = classify_intents(req.question)
     except Exception:
         logger.error("[/assistant] intent classification FAILED\n%s", traceback.format_exc())
-        intents = []
+        detected_intents_from_question = []
+    intents = list(detected_intents_from_question)
     _timings["intent"] = time.perf_counter() - _t
-    logger.info("[/assistant] ⏱  Intents: %.3fs  (%s)", _timings["intent"], intents)
+    logger.info(
+        "[/assistant] ⏱  Intents: %.3fs  current=%s",
+        _timings["intent"], detected_intents_from_question,
+    )
 
     direct = is_direct_intent(intents)
     multi = is_multi_field_intent(intents)
 
     # Follow-up intent repair: borrow domain intents from recent history when
-    # the current question is ambiguous.
-    if is_ambiguous_followup_question(req.question) and not _has_strong_domain_intent_signal(intents):
-        inferred_intents = infer_intents_from_history(history_messages)
-        if inferred_intents:
-            intents = inferred_intents
+    # the current question is a real follow-up and has no strong current intent.
+    if is_followup and not _has_strong_domain_intent_signal(intents):
+        detected_intents_from_history = infer_intents_from_history(history_messages)
+        if detected_intents_from_history:
+            intents = detected_intents_from_history
+            used_history_intent = True
             direct = is_direct_intent(intents)
             multi = is_multi_field_intent(intents)
             logger.info("[/assistant] intents refined from history: %s", intents)
 
     # ── Comparison-context injection ─────────────────────────────────────────
-    # If the previous assistant turn asked for a comparison criterion AND the
-    # current question is a criterion-only follow-up, inject "comparison" intent.
+    # Only explicit comparison language in the current question may create a
+    # comparison. Pending comparison history must not hijack normal questions.
     _pending_comparison_plants: list[str] = []
-    if "comparison" not in intents and history_messages and is_store_loaded():
-        _all_names_inject = get_all_plant_lookup_names()
+    _explicit_comparison = _has_explicit_comparison_signal(req.question)
+    if "comparison" not in intents and _explicit_comparison:
+        intents = ["comparison"]
+        direct = True
+        multi = False
+        used_comparison_context = True
+    if "comparison" in intents and _explicit_comparison and history_messages and is_store_loaded():
         _pending_comparison_plants = extract_pending_comparison_plants_from_history(
-            history_messages, _all_names_inject
+            history_messages, all_names_for_context
         )
-        if _pending_comparison_plants:
-            _crit_from_current = detect_comparison_criterion(req.question)
-            if _crit_from_current != "unknown" or len(req.question.strip()) <= 40:
-                intents = ["comparison"]
-                direct = True
-                multi = False
-                logger.info(
-                    "[/assistant] COMPARISON_CONTEXT_INJECTION: injected 'comparison' intent "
-                    "| pendingComparisonPlants=%s | resolvedFollowupCriterion=%s "
-                    "| usedConversationContext=True",
-                    _pending_comparison_plants,
-                    _crit_from_current,
-                )
+        used_comparison_context = bool(_pending_comparison_plants)
+        if used_comparison_context:
+            logger.info(
+                "[/assistant] COMPARISON_CONTEXT_AVAILABLE: pendingComparisonPlants=%s",
+                _pending_comparison_plants,
+            )
 
     logger.info("[/assistant] direct=%s  multi=%s", direct, multi)
 
     # ── Step 1.5: Route question (domain_rag vs general_conversation) ────────
     _t = time.perf_counter()
-    all_names_for_routing = get_all_plant_lookup_names() if is_store_loaded() else []
     route_decision = classify_route(
         question=effective_question,
         intents=intents,
-        all_plant_names=all_names_for_routing,
+        all_plant_names=all_names_for_context,
         conversation_history=history_messages,
-        is_followup=is_ambiguous_followup_question(req.question),
+        is_followup=is_followup,
     )
     _timings["routing"] = time.perf_counter() - _t
     logger.info(
@@ -389,12 +406,18 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
     plant_name: Optional[str] = None
     plant_data: Optional[dict] = None
     excel_hit = False
+    _plant_from_history: bool = False
+    _plant_from_retrieval: bool = False
+    detected_plant_from_history: Optional[str] = None
 
     if is_store_loaded():
-        all_names = get_all_plant_lookup_names()
-        plant_name = extract_target_plant(effective_question, all_names)
-        if not plant_name and is_ambiguous_followup_question(req.question):
-            plant_name = infer_plant_from_history(history_messages, all_names)
+        all_names = all_names_for_context
+        plant_name = detected_plant_from_question
+        if not plant_name and is_followup:
+            detected_plant_from_history = infer_plant_from_history(history_messages, all_names)
+            if detected_plant_from_history:
+                plant_name = detected_plant_from_history
+                _plant_from_history = True
         if plant_name:
             plant_data = get_plant_data(plant_name)
             original = get_plant_original_name(plant_name)
@@ -408,9 +431,13 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
             logger.info("[/assistant] Excel hit: %r", plant_name)
 
             # Secondary check: detect a second plant-like token NOT in the DB.
-            _second_unlisted = _find_additional_unlisted_plant(
-                effective_question, all_names, plant_name
-            )
+            # Skip this for comparison questions; comparison_service resolves
+            # multiple plants itself and deduplicates aliases.
+            _second_unlisted = None
+            if "comparison" not in intents and not _plant_from_history:
+                _second_unlisted = _find_additional_unlisted_plant(
+                    req.question, all_names, detected_plant_from_question or plant_name
+                )
             if _second_unlisted:
                 logger.info(
                     "[/assistant] SECONDARY_PLANT_CHECK: found unlisted mention=%r "
@@ -444,6 +471,28 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
     )
     _timings["comparison"] = time.perf_counter() - _t
     if comparison_response is not None:
+        logger.info(
+            "[ASSISTANT_RESOLUTION_FINAL] rawQuestion=%r | effectiveQuestion=%r | "
+            "detectedPlantFromQuestion=%r | detectedPlantFromHistory=%r | finalPlant=%r | "
+            "detectedIntentFromQuestion=%s | detectedIntentFromHistory=%s | finalIntent=%s | "
+            "isFollowup=%s | usedHistoryPlant=%s | usedHistoryIntent=%s | "
+            "usedRetrievalPlant=%s | usedComparisonContext=%s | responseMode=%s | reason=%s",
+            req.question,
+            effective_question,
+            detected_plant_from_question,
+            detected_plant_from_history,
+            None,
+            detected_intents_from_question,
+            detected_intents_from_history,
+            intents,
+            is_followup,
+            _plant_from_history,
+            used_history_intent,
+            _plant_from_retrieval,
+            used_comparison_context,
+            comparison_response.get("responseMode"),
+            "explicit_comparison",
+        )
         return comparison_response
 
     # ── Step 3: Retrieval (FAISS semantic search) ─────────────────────────────
@@ -467,23 +516,17 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
 
     best_score = get_best_retrieval_score(retrieved) if retrieved else 0.0
 
-    # If we didn't find the plant from the question, try from retrieved cards.
+    # Do not infer the target plant from FAISS. Retrieval can support context,
+    # but plant identity must come from the current question or a real follow-up
+    # history reference. This prevents stale/random plant answers.
     if not excel_hit and retrieved and is_store_loaded():
-        for r in retrieved:
-            card_name = extract_plant_name(r["card"])
-            pdata = get_plant_data(card_name)
-            if pdata:
-                plant_name = card_name
-                original = get_plant_original_name(card_name)
-                if original:
-                    plant_name = original
-                display_plant_name = get_plant_display_name(plant_name, answer_language)
-                if display_plant_name:
-                    plant_name = display_plant_name
-                plant_data = pdata
-                excel_hit = True
-                logger.info("[/assistant] Excel hit via retrieved card: %r", plant_name)
-                break
+        logger.info(
+            "[/assistant] RETRIEVAL_PLANT_SKIP: skipping FAISS-based plant inference "
+            "| currentPlant=%r | historyPlant=%r | intents=%s",
+            detected_plant_from_question,
+            detected_plant_from_history,
+            intents,
+        )
 
     # ── Build source references ───────────────────────────────────────────────
     retrieved_sources = [
@@ -518,7 +561,34 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
         alternatives = []
     _timings["context"] = time.perf_counter() - _t
 
-    suggestion = suggest_plant_name(effective_question) if not excel_hit else None
+    suggestion = suggest_plant_name(req.question) if not excel_hit else None
+
+    # ── Resolution summary (logged before every decision) ─────────────────────
+    logger.info(
+        "[ASSISTANT_RESOLUTION_PRE] rawQuestion=%r | effectiveQuestion=%r | "
+        "detectedPlantFromQuestion=%r | detectedPlantFromHistory=%r | finalPlant=%r | "
+        "detectedIntentFromQuestion=%s | detectedIntentFromHistory=%s | finalIntent=%s | "
+        "detectedLanguage=%s | isFollowup=%s | usedHistoryPlant=%s | "
+        "usedHistoryIntent=%s | usedRetrievalPlant=%s | usedComparisonContext=%s | "
+        "needsPlantName=%s | excelHit=%s | bestScore=%.4f",
+        req.question,
+        effective_question,
+        detected_plant_from_question,
+        detected_plant_from_history,
+        plant_name,
+        detected_intents_from_question,
+        detected_intents_from_history,
+        intents,
+        answer_language,
+        is_followup,
+        _plant_from_history,
+        used_history_intent,
+        _plant_from_retrieval,
+        used_comparison_context,
+        _needs_plant_name(intents),
+        excel_hit,
+        best_score,
+    )
 
     # ══════════════════════════════════════════════════════════════════════════
     # DECISION: Choose response mode
@@ -658,39 +728,46 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
 
     else:
         # ── No Excel hit: safe, specific response.  NO LLM call allowed. ─────
+        # Priority order:
+        #  1. Named a plant we don't have   → plant_not_found
+        #  2. Unclear plant expression      → unclear_plant
+        #  3. Intent needs a plant name     → ask_for_plant_name  (score-independent)
+        #  4. Low confidence               → insufficient_context
+        #  5. High score but no Excel hit  → fallback
         _t = time.perf_counter()
         _all_names_fb = get_all_plant_lookup_names() if is_store_loaded() else []
-        if best_score < CONFIDENCE_THRESHOLD:
-            if _is_unclear_plant_expression(effective_question):
-                answer = _msg(answer_language, "unclear_plant")
-                response_mode = "unclear_plant"
-                logger.info(
-                    "[/assistant] MODE: unclear_plant | explicit_expression | score=%.4f",
-                    best_score,
-                )
-            else:
-                _unlisted = _detect_unlisted_plant_mention(effective_question, _all_names_fb)
-                if _unlisted:
-                    answer = _msg(answer_language, "plant_not_found")
-                    response_mode = "plant_not_found"
-                    logger.info(
-                        "[/assistant] MODE: plant_not_found | entity=%r | score=%.4f < threshold=%.4f",
-                        _unlisted, best_score, CONFIDENCE_THRESHOLD,
-                    )
-                elif _needs_plant_name(intents):
-                    answer = _msg(answer_language, "ask_for_plant")
-                    response_mode = "ask_for_plant_name"
-                    logger.info(
-                        "[/assistant] MODE: ask_for_plant_name | intents=%s | score=%.4f",
-                        intents, best_score,
-                    )
-                else:
-                    answer = _msg(answer_language, "insufficient_context")
-                    response_mode = "insufficient_context"
-                    logger.info(
-                        "[/assistant] MODE: insufficient_context | score=%.4f < threshold=%.4f",
-                        best_score, CONFIDENCE_THRESHOLD,
-                    )
+        _unlisted = _detect_unlisted_plant_mention(req.question, _all_names_fb)
+        if _unlisted:
+            answer = _msg(answer_language, "plant_not_found")
+            response_mode = "plant_not_found"
+            logger.info(
+                "[/assistant] MODE: plant_not_found | entity=%r | score=%.4f",
+                _unlisted, best_score,
+            )
+        elif _is_unclear_plant_expression(effective_question):
+            answer = _msg(answer_language, "unclear_plant")
+            response_mode = "unclear_plant"
+            logger.info(
+                "[/assistant] MODE: unclear_plant | explicit_expression | score=%.4f",
+                best_score,
+            )
+        elif _needs_plant_name(intents):
+            # The user asked a plant-specific question but never provided a plant
+            # name (not in question, not in history).  Ask instead of guessing.
+            answer = _msg(answer_language, "ask_for_plant")
+            response_mode = "ask_for_plant_name"
+            logger.info(
+                "[/assistant] MODE: ask_for_plant_name | intents=%s | "
+                "no_plant_in_question | no_plant_in_history | score=%.4f",
+                intents, best_score,
+            )
+        elif best_score < CONFIDENCE_THRESHOLD:
+            answer = _msg(answer_language, "insufficient_context")
+            response_mode = "insufficient_context"
+            logger.info(
+                "[/assistant] MODE: insufficient_context | score=%.4f < threshold=%.4f",
+                best_score, CONFIDENCE_THRESHOLD,
+            )
         else:
             answer = _msg(answer_language, "insufficient_context")
             response_mode = "fallback"
@@ -767,6 +844,58 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
                 )
                 answer = _msg(answer_language, "missing_data")
                 response_mode = "missing_data"
+
+    _resolution_reason = (
+        "current_question_plant"
+        if detected_plant_from_question and excel_hit
+        else "history_followup_plant"
+        if _plant_from_history and excel_hit
+        else "missing_data"
+        if response_mode == "missing_data"
+        else "unlisted_plant"
+        if response_mode == "plant_not_found"
+        else "needs_plant_name"
+        if response_mode == "ask_for_plant_name"
+        else response_mode
+    )
+    logger.info(
+        "[ASSISTANT_RESOLUTION_FINAL] rawQuestion=%r | effectiveQuestion=%r | "
+        "detectedPlantFromQuestion=%r | detectedPlantFromHistory=%r | finalPlant=%r | "
+        "detectedIntentFromQuestion=%s | detectedIntentFromHistory=%s | finalIntent=%s | "
+        "detectedLanguage=%s | isFollowup=%s | usedHistoryPlant=%s | "
+        "usedHistoryIntent=%s | usedRetrievalPlant=%s | usedComparisonContext=%s | "
+        "responseMode=%s | reason=%s",
+        req.question,
+        effective_question,
+        detected_plant_from_question,
+        detected_plant_from_history,
+        plant_name,
+        detected_intents_from_question,
+        detected_intents_from_history,
+        intents,
+        answer_language,
+        is_followup,
+        _plant_from_history,
+        used_history_intent,
+        _plant_from_retrieval,
+        used_comparison_context,
+        response_mode,
+        _resolution_reason,
+    )
+    logger.info(
+        "[FOLLOWUP_DEBUG] rawQuestion=%r | detectedPlantFromCurrentQuestion=%r | "
+        "lastPlantFromHistory=%r | finalPlant=%r | detectedIntent=%s | "
+        "isFollowUp=%s | usedHistoryPlant=%s | responseMode=%s | reason=%s",
+        req.question,
+        detected_plant_from_question,
+        detected_plant_from_history,
+        plant_name,
+        intents,
+        is_followup,
+        _plant_from_history,
+        response_mode,
+        _resolution_reason,
+    )
 
     # ── Performance summary ───────────────────────────────────────────────────
     if not _data_debug_logged:
