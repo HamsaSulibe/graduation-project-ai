@@ -320,6 +320,18 @@ INTENTS: list[dict] = [
     # â”€â”€ 12. General summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # shortDescriptionAr (Plants) + usesInfoAr (Care_Details)
     {
+        "name": "uses",
+        "label_ar": "الاستخدامات",
+        "keywords": [
+            "استخدامات", "استخدام", "فوائد", "فوايد", "فائدة", "فايدة",
+            "uses", "use", "what is it used for", "what are its uses",
+        ],
+        "fields": {
+            "uses_info_ar": "الاستخدامات",
+        },
+        "direct": True,
+    },
+    {
         "name": "general_summary",
         "label_ar": "Ù…Ù„Ø®Øµ Ø¹Ø§Ù… Ø¹Ù† Ø§Ù„Ù†Ø¨ØªØ©",
         "keywords": [
