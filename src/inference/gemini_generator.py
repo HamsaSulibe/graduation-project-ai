@@ -1,8 +1,8 @@
 """
 gemini_generator.py – Google Gemini API generation layer.
 
-Replaces the local HuggingFace model with Gemini for text generation.
-Exposes the same interface used by the RAG pipeline.
+NOT USED – replaced by openai_generator.py.
+Kept here for reference only.
 """
 
 from __future__ import annotations
