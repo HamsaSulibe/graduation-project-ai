@@ -106,8 +106,11 @@ def retrieve_relevant_context(
 _NON_PLANT_TOKENS: frozenset[str] = frozenset({
     # Generic plant-domain nouns
     "نبات", "نبتة", "نباتات", "عشبة", "اعشاب", "أعشاب",
-    "زراعة", "ري", "تربة", "سماد", "حصاد", "ضوء", "شمس",
+    "زراعة", "ازرع", "أزرع", "يزرع", "تزرع", "زرع",
+    "ري", "تربة", "سماد", "حصاد", "ضوء", "شمس",
     "اصيص", "موسم", "فلسطين",
+    "مباشر", "مباشرة", "مباشره", "غير", "تحب", "يحب",
+    "يحتاج", "تحتاج", "بحب", "بتحب", "بدها", "بده",
     # Care/task schedule words
     "مهام", "مهمة", "مهمه",
     "جدول",
@@ -732,6 +735,13 @@ def _sentences_general_summary(p: str, d: dict) -> list[str]:
     return out
 
 
+def _sentences_uses(p: str, d: dict) -> list[str]:
+    uses = _g(d, "uses_info_ar")
+    if not uses:
+        return []
+    return [_clean_text(uses)]
+
+
 
 
 def _sentences_humidity(p: str, d: dict) -> list[str]:
@@ -903,6 +913,7 @@ _NATURALIZERS: dict = {
     "tasks":           _sentences_tasks,
     "care_summary":    _sentences_care_summary,
     "plant_names":     _sentences_plant_names,
+    "uses":            _sentences_uses,
     "germination":     _sentences_germination,
     "spacing":         _sentences_spacing,
 }
@@ -1142,6 +1153,7 @@ def _detect_comparison_criterion(question: str) -> str:
     if any(p in q for p in (
         "يحتاج ري", "ري اكثر", "سقي اكثر", "اسقي اكثر",
         "يحتاج ماء", "يحتاج مياه", "حاجة ري",
+        "من ناحية الري", "ناحية الري", "معيار الري",
         # new patterns
         "حاجة للماء", "حاجه للماء", "احتياج للماء", "احتاج ماء",
         "اكثر ري", "اكثر ريا", "اقل ري", "اقل ريا",

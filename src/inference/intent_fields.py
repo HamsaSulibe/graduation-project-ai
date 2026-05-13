@@ -102,6 +102,19 @@ _COMPARISON_PREEMPT_PATTERNS: tuple[str, ...] = (
     "tolerates cold",
 )
 
+_USES_PREEMPT_PATTERNS: tuple[str, ...] = (
+    "استخدامات",
+    "استخدام",
+    "فوائد",
+    "فوايد",
+    "فائدة",
+    "فايدة",
+    "uses",
+    "use",
+    "what is it used for",
+    "what are its uses",
+)
+
 
 def classify_intents(question: str) -> list[str]:
     """
@@ -123,6 +136,12 @@ def classify_intents(question: str) -> list[str]:
     for _pat in _COMPARISON_PREEMPT_PATTERNS:
         if normalize(_pat).lower() in q_norm:
             return ["comparison"]
+
+    # ── Uses preemption ──────────────────────────────────────────────────────
+    # Keep usage questions focused on usesInfo* instead of broad summaries.
+    for _pat in _USES_PREEMPT_PATTERNS:
+        if normalize(_pat).lower() in q_norm:
+            return ["uses"]
 
     # ── Task-schedule preemption ──────────────────────────────────────────
     # Specific multi-word task patterns override the normal multi_match priority
