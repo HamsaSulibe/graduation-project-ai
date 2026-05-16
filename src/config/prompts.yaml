@@ -105,7 +105,7 @@ rewrite:
     - Arabic only
     - concise – prefer 3 to 5 short lines
     - no technical terms
-    - no mention of Gemini, RAG, context, retrieval
+    - no mention of OpenAI, RAG, context, retrieval
     - do not create long paragraphs
     - do not repeat the question
     - start directly, no introduction like "بناءً على البيانات" or "وفقًا للمعلومات"
