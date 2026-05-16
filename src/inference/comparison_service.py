@@ -3,7 +3,7 @@ comparison_service.py – Handles plant comparison logic for the Garssa
 Smart Plant Assistant.
 
 Exposes a single entry-point: handle_comparison_request().
-No Gemini / LLM calls are made here; answers are built purely from
+No LLM calls are made here; answers are built purely from
 structured Excel data via build_comparison_answer().
 No plant names are hardcoded.
 """
