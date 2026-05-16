@@ -73,7 +73,7 @@ def load_assets():
 
     try:
         load_generation_model()
-        print("✅ Generation model loaded: Gemini API")
+        print("✅ Generation model loaded: OpenAI API")
     except Exception as exc:
         print(f"⚠️  Generation model could not be loaded: {exc}")
         print("   The /assistant endpoint will return retrieval‑only fallback answers.")
