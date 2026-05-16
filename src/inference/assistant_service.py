@@ -173,7 +173,7 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
     Response modes
     ──────────────
     direct_from_data   – single-topic; answer built entirely from Excel data.
-    rewrite_from_data  – multi-topic; Excel draft rewritten by Gemini.
+    rewrite_from_data  – multi-topic; Excel draft rewritten by the LLM.
     out_of_scope       – question unrelated to the plant database.
     greeting           – Arabic greeting detected.
     fallback           – domain question with insufficient evidence.
@@ -206,7 +206,7 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
     )
 
     # ── GUARD 0.5: Pure out-of-scope pre-check ───────────────────────────────
-    # Fires before plant extraction / intent detection / retrieval / Gemini.
+    # Fires before plant extraction / intent detection / retrieval / LLM.
     _pre_oos_part = _contains_out_of_scope_part(req.question)
     _domain_part = _contains_domain_part_keywords(req.question)
     if not _domain_part and is_store_loaded():
@@ -242,7 +242,7 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
         }
 
     # ── GUARD 0.75: Hallucination-request detection ──────────────────────────
-    # Fires before plant extraction / intent detection / retrieval / Gemini.
+    # Fires before plant extraction / intent detection / retrieval / LLM.
     if _is_hallucination_request(req.question):
         _pre_blocked_before_plant = True
         logger.info(
@@ -1003,7 +1003,7 @@ def handle_assistant_request(req: AssistantRequest) -> dict:
         "extractedPlantName=%r | matchedPlantId=N/A | matchedPlantName=%r | "
         "plantMatchScore=%.4f | detectedIntent=%s | selectedTable=%s | "
         "selectedFields=%s | tasksFoundCount=%d | careDetailsFound=%s | "
-        "hasRequiredData=%s | retrievalScore=%.4f | usedGemini=%s | "
+        "hasRequiredData=%s | retrievalScore=%.4f | generationUsed=%s | "
         "responseMode=%s | fallbackReason=%s",
         req.question,
         answer_language,
